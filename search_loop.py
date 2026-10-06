@@ -59,7 +59,7 @@ class AEGcTFNASSearch:
                             -1, 1)
 
     # -- main loop -----------------------------------------------------
-    def run(self) -> BestPool:
+    def run(self, progress_callback=None) -> BestPool:
         cfg = self.cfg
 
         for t in range(cfg.n_generations):
@@ -162,6 +162,9 @@ class AEGcTFNASSearch:
                 "C_E": c_e, "C_D": c_d,
                 "best_score": self.best_pool.best_score(),
             })
+
+            if progress_callback is not None:
+                progress_callback(t, cfg.n_generations, self.history[-1])
 
         return self.best_pool
 

@@ -31,17 +31,17 @@ def compute_jacob_cov(model: nn.Module, inputs: torch.Tensor, eps: float = 1e-5)
     model.zero_grad()
 
     output = model(inputs)
-    # sum per-sample outputs, then backprop each sample's contribution
-    # separately to get a per-sample input-gradient ("Jacobian row")
-    batch_size = inputs.shape[0]
-    jacobians = []
-    for i in range(batch_size):
-        if inputs.grad is not None:
-            inputs.grad.zero_()
-        output[i].sum().backward(retain_graph=True)
-        jacobians.append(inputs.grad[i].detach().cpu().flatten().clone().numpy())
-
-    J = np.stack(jacobians, axis=0)  # (N, D)
+    # Single backward call for the whole batch at once (standard zero-cost
+    # NAS implementation), NOT a Python loop with one backward() per
+    # sample -- conv/batchnorm layers naturally keep per-sample gradients
+    # correct in one pass since the batch dimension doesn't mix at the
+    # input layer. A per-sample loop (an earlier version of this function
+    # did that) is both much slower AND, on GPU, actively counterproductive:
+    # many small sequential backward() calls incur per-call kernel-launch
+    # overhead that dwarfs the actual compute, so it can end up SLOWER on
+    # GPU than CPU. One vectorized call avoids all of that.
+    output.backward(torch.ones_like(output))
+    J = inputs.grad.detach().cpu().reshape(inputs.shape[0], -1).numpy()  # (N, D)
     # corrcoef needs variance > 0 per row; guard against degenerate rows
     if np.allclose(J.std(axis=1), 0):
         return float("-inf")  # totally uninformative architecture
@@ -84,11 +84,15 @@ def compute_synflow(model: nn.Module, input_shape) -> float:
 # ---------------------------------------------------------------------------
 # Combination -> single scalar to MINIMIZE
 # ---------------------------------------------------------------------------
-def compute_proxy_scores(model: nn.Module, inputs: torch.Tensor) -> dict:
+def compute_proxy_scores(model: nn.Module, inputs: torch.Tensor,
+                          device: str = "cpu") -> dict:
     c, h, w = inputs.shape[1:]
     flops = compute_flops(model, (c, h, w))
-    jacob = compute_jacob_cov(model, inputs)
     synflow_raw = compute_synflow(model, (c, h, w))
+
+    jacob_model = model.to(device)  # in-place move; fine since this model
+                                     # is discarded after scoring anyway
+    jacob = compute_jacob_cov(jacob_model, inputs)
     # synflow spans many orders of magnitude across architectures/depths;
     # log-space keeps the later z-score normalization well-behaved
     synflow_log = float(np.log1p(max(synflow_raw, 0.0)))
@@ -137,8 +141,8 @@ def make_objective_fn(unet_kwargs: dict, sample_batch: torch.Tensor,
         dec_samples = [x_flat[offset + i * block_len: offset + (i + 1) * block_len]
                        for i in range(n_blocks)]
 
-        model = build_unet(geno, enc_samples, dec_samples, **unet_kwargs).to(device)
-        raw = compute_proxy_scores(model, sample_batch)
+        model = build_unet(geno, enc_samples, dec_samples, **unet_kwargs)  # stays on CPU
+        raw = compute_proxy_scores(model, sample_batch, device=device)
         z = normalizer.normalize(raw)
 
         w_flops, w_jacob, w_synflow = weights

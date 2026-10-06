@@ -89,8 +89,13 @@ def main():
 
     print(f"Starting search: {args.n_generations} generations, "
           f"{args.n_blocks} blocks, base_channels={args.base_channels}")
+    print("(each generation builds + scores up to 4 architectures -- "
+          "progress prints below after each one)", flush=True)
     t0 = time.time()
-    best_pool = search.run()
+    best_pool = search.run(progress_callback=lambda i, n, row: print(
+        f"  iter {i+1}/{n}  active={row['active']:<7} f_X={row['f_X']:.3f}  "
+        f"best={row['best_score']:.3f}  ({time.time()-t0:.1f}s elapsed)",
+        flush=True))
     elapsed = time.time() - t0
     print(f"\nSearch finished in {elapsed:.1f}s "
           f"({elapsed/args.n_generations:.1f}s/iteration)")
